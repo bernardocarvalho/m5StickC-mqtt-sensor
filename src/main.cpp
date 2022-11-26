@@ -1,21 +1,21 @@
 /*
- *
- * vim: sta:et:sw=4:ts=4:sts=4
- *  * @file
- *******************************************************************************
- * Copyright (c) 2021 by M5Stack
- *                  Equipped with M5StickC sample source code
- *                          配套  M5StickC 示例源代码
- * Visit for more information: https://docs.m5stack.com/en/core/m5stickc
- *
- * Describe:  NTP TIME.
- * Date: 2021/8/3
- * https://docs.m5stack.com/en/core/m5stickc
- * https://docs.m5stack.com/en/unit/watering
- * https://github.com/m5stack/M5Stack/blob/master/examples/Unit/WATERING/WATERING.ino
- * https://console.hivemq.cloud/clients/arduino-esp8266?uuid=e6c3a2b784ad4434b0238f17f98eac34
- * https://github.com/m5stack/M5StickC/blob/master/examples/Advanced/MQTT/MQTT.ino
- *******************************************************************************/
+* vim: sta:et:sw=4:ts=4:sts=4
+*  * @file
+*******************************************************************************
+* Copyright (c) 2021 by M5Stack
+*                  Equipped with M5StickC sample source code
+*                          配套  M5StickC 示例源代码
+* Visit for more information: https://docs.m5stack.com/en/core/m5stickc
+*
+* Describe:  NTP TIME.
+* Date: 2021/8/3
+* https://docs.m5stack.com/en/core/m5stickc
+* https://docs.m5stack.com/en/unit/watering
+* https://github.com/m5stack/M5Stack/blob/master/examples/Unit/WATERING/WATERING.ino
+* https://console.hivemq.cloud/clients/arduino-esp8266?uuid=e6c3a2b784ad4434b0238f17f98eac34
+* https://github.com/m5stack/M5StickC/blob/master/examples/Advanced/MQTT/MQTT.ino
+******************************************************************************
+*/
 
 #include <Arduino.h>
 
@@ -39,6 +39,8 @@
 #include "arduino_secrets.h"
 #endif
 
+const int WATER_AUTO = 2UL; // in sec. Auto water/ day
+
 const char *ssid = STASSID;
 const char *password = STAPSK;
 
@@ -50,26 +52,27 @@ const int mqtt_port = 1883;
 #define PUMP_PIN  32 //  SDA
 
 //const char* ssid     = "A52_BBC";
+bool led_state = false;
 
 WiFiClient espClient;
-//PubSubClient mqttClientP(espClient);
 MqttClient mqttClient(espClient);
 WiFiUDP ntpUDP;
 //NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 3600, 60000);
-//NTPClient timeClient(ntpUDP, "193.136.152.71", 3600, 60000);
 
 const char willTopic[] = "ipfn/m5stick/will";
 const char inTopic[]   = "ipfn/m5stick/in";
 const char outTopic[]  = "ipfn/m5stick/out";
 
-const char* ntpServer = "ntp1.tecnico.ulisboa.pt";
-//"time1.aliyun.com";  // Set the connect NTP server.
+const char* ntpServer = "ntp1.tecnico.ulisboa.pt";  // Set the connect NTP server.
 const long gmtOffset_sec     = 0;
 const int daylightOffset_sec = 3600;
 #define MSG_BUFFER_SIZE 50
 char msg[MSG_BUFFER_SIZE];
 
 int rawADC;
+unsigned int sumWater = 0;
+
+unsigned long stopPump = 0, nextWater;
 
 #define SERIAL_PRINTF_MAX_BUFF      256
 void serialPrintf(const char *fmt, ...);
@@ -98,9 +101,6 @@ void printLocalTime() {  // Output current time.
     Serial.println(&timeinfo,
             "%A, %B %d %Y %H:%M:%S");  //prints date and time.
     strftime(msg, MSG_BUFFER_SIZE, "%A, %B %d %Y %H:%M:%S", &timeinfo);
-
-    //serialPrintf("%A, %B %d \n%Y %H:%M:%S", &timeinfo);  // Screen prints date and time.
-    //serialPrintf("%d, %d\n", timeinfo.tm_min, timeinfo.tm_sec);  // Screen prints date and time.
 
 }
 void setup_wifi() {
@@ -145,27 +145,21 @@ void onMqttMessage(int messageSize) {
     /* use the Stream interface to print the contents
     //
     while (mqttClient.available()) {
-        Serial.print((char)mqttClient.read());
+    Serial.print((char)mqttClient.read());
     }
     */
     deserializeJson(doc, mqttClient);
 
     Serial.print(", Pump: ");
     int pump = doc["pump"];
+    unsigned long now = millis();
+    if (pump == 1){
+        nextWater = now + 2000UL;
+    }
     Serial.print(pump);
     Serial.println();
 
 }
-void callback(char* topic, byte* payload, unsigned int length) {
-    M5.Lcd.print("Message arrived [");
-    M5.Lcd.print(topic);
-    M5.Lcd.print("] ");
-    for (int i = 0; i < length; i++) {
-        M5.Lcd.print((char)payload[i]);
-    }
-    M5.Lcd.println();
-}
-
 
 void setup() {
     M5.begin();             // Init M5Stick.
@@ -177,30 +171,6 @@ void setup() {
     M5.Lcd.setRotation(3);  // Rotate the screen.
     M5.Lcd.printf("\nConnecting to %s", ssid);
     Serial.begin(115200);
-    /*
-     * Serial.println("Hello.");
-     Serial.print("Connecting to ");
-     Serial.print(ssid);
-     WiFi.mode(WIFI_STA); // Setup ESP in client mode
-     WiFi.begin(ssid, password);  // Connect wifi and return connection status.
-    //
-    for (int i =0; i < 10; i++){
-    if (WiFi.status() !=WL_CONNECTED) {  // If the wifi connection fails.
-
-    delay(500);         // delay 0.5s.
-    Serial.print(".");
-    M5.Lcd.print(".");
-    }
-    else
-    {
-
-    Serial.println("\nCONNECTED!");
-    M5.Lcd.println("\nCONNECTED!");
-    break;
-    }
-    //	while (WiFi.status() != WL_CONNECTED) {  // If the wifi connection fails.
-    }
-    */
     setup_wifi();
     /*
        mqttClientP.setServer(mqtt_server,
@@ -245,25 +215,30 @@ void setup() {
             ntpServer, "pool.ntp.org", "time.nist.gov");  // init and get the time.
     // printLocalTime();
     //WiFi.mode(WIFI_OFF);  // Set the wifi mode to off.
+    unsigned long now = millis();
+    nextWater =  now + 24UL * 3600UL * 1000UL; // start next day
     delay(20);
 }
 void loop() {
     static  unsigned long lastMsg = 0;
-    static bool led_state= false;
     StaticJsonDocument<256> doc;
-    /*
-       if (!mqttClientP.connected()) {
-       reConnect();
-       }
-       mqttClientP.loop();  // This function is called periodically to allow clients to
-    // process incoming messages and maintain connections to the
-    // server.
+
+    unsigned long now = millis();
+    if (now > nextWater){
+        nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
+        stopPump = now + WATER_AUTO * 1000UL;
+        sumWater += WATER_AUTO;
+        led_state = true;
+        digitalWrite(M5_LED, led_state);
+        digitalWrite(PUMP_PIN, HIGH);
+    }
+    if (now > stopPump){
+        digitalWrite(PUMP_PIN, LOW);
+        led_state = false;
+        digitalWrite(M5_LED, led_state);
+    }
     //
-    */
     mqttClient.poll();
-    unsigned long now = millis(); 
-    //delay(1000);
-    //
     if (now - lastMsg > 2000) {
         lastMsg = now;
 
@@ -276,7 +251,6 @@ void loop() {
         M5.Lcd.setCursor(40, 100);
         M5.Lcd.print(msg);
         //M5.Lcd.print("ADC: " + String(rawADC));
-        //mqttClientP.publish("ipfn/rega", msg);  // Publishes a mesnsage to the specified
         // topic.
 
         M5.Lcd.setCursor(0, 25);  // Set cursor to (0,25).
@@ -284,16 +258,18 @@ void loop() {
 
         //    Serial.println(timeClient.getFormattedTime());
 
-        //     digitalWrite(PUMP_PIN, led_state);
         doc["msg"]   = msg;
 
         printLocalTime(); // Time string will be on msq
-        doc["time"]   = msg;
+        doc["time"]  = msg;
         doc["Humid"] = rawADC;
-        //doc["count"]   = count++;
+        doc["sumWater"] = sumWater;
         doc["AXP_Temp"]   =  M5.Axp.GetTempInAXP192();
         doc["Bat_I"]   =  M5.Axp.GetBatCurrent();
         doc["Bat_V"]   =  M5.Axp.GetBatVoltage();
+        doc["In5_V"]   =  M5.Axp.GetVinVoltage();
+        doc["In5_I"]   =  M5.Axp.GetVinCurrent();
+        doc["USB_I"]   =  M5.Axp.GetVBusCurrent();
         /*
            display.printf("Bat:\r\n  V: %.3fv  I: %.3fma\r\n", M5.Axp.GetBatVoltage(),
            M5.Axp.GetBatCurrent());
@@ -310,8 +286,5 @@ void loop() {
         mqttClient.beginMessage(outTopic,  (unsigned long)measureJson(doc), retained, qos, dup);
         serializeJson(doc, mqttClient);
         mqttClient.endMessage();
-
-        digitalWrite(M5_LED, led_state);
-        led_state = not led_state;
     }
 }
