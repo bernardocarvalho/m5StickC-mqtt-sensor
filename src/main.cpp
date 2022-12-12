@@ -9,6 +9,9 @@
  *
  * Describe:  NTP TIME.
  * Date: 2021/8/3
+Host gps
+    HostName 10.136.227.237
+    User bernardo
  * https://docs.m5stack.com/en/core/m5stickc
  * https://docs.m5stack.com/en/unit/watering
  * https://github.com/m5stack/M5Stack/blob/master/examples/Unit/WATERING/WATERING.ino
@@ -32,14 +35,14 @@
 #include <ArduinoJson.h>
 
 // Set the name and password of the wifi to be connected.
-#ifndef STASSID
+#ifndef SECRET_SSID
 #include "arduino_secrets.h"
 #endif
 
 const int WATER_AUTO = 2UL; // in sec. Auto water/ day
 
-const char *ssid = STASSID;
-const char *password = STAPSK;
+const char *ssid = SECRET_SSID;
+const char *password = SECRET_PASS;
 
 const char* mqtt_broker  = "test.mosquitto.org";
 const int mqtt_port = 1883;
@@ -48,7 +51,6 @@ const int msgPeriod = 30 * 1000U;
 #define INPUT_PIN 33 //  SCL
 #define PUMP_PIN  32 //  SDA
 
-bool led_state = false;
 
 WiFiClient espClient;
 MqttClient mqttClient(espClient);
@@ -64,12 +66,18 @@ const int daylightOffset_sec = 0; // 3600;
 #define MSG_BUFFER_SIZE 50
 char msg[MSG_BUFFER_SIZE];
 
+#define WIFI_RETRY 20
+bool wifiOK = false;
+bool ntpOK = false;
+
+bool led_blink = false;
+bool led_state = false;
+
 int rawADC;
 unsigned int sumWater = 0;
 
 unsigned long stopPump = 0, nextWater;
 
-bool ntpOK = false;
 void printLocalTime() {  // Output current time.
     struct tm timeinfo;
     M5.Lcd.setCursor(0, 20);
@@ -87,27 +95,48 @@ void printLocalTime() {  // Output current time.
     strftime(msg, MSG_BUFFER_SIZE, "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
 
 }
-void setup_wifi() {
+void reconnect_wifi() {
+    if (WiFi.status() == WL_CONNECTED)
+        return;
     delay(10);
     // We start by connecting to a WiFi network
     Serial.println();
     Serial.print("Connecting to ");
     Serial.println(ssid);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.printf("Connecting to %s.", ssid);
 
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    wifiOK = false;
+
     WiFi.begin(ssid, password);
+    led_state = false;
+    led_blink = false;
 
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    for(int i = 0; i < WIFI_RETRY; i++){
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.print(".");
+            led_state = not led_state;
+            digitalWrite(M5_LED, led_state);
+            delay(500);
+           // continue;
+        }
+        else {
+            wifiOK = true;
+            led_blink = true;
+
+            Serial.println("");
+            Serial.println("WiFi connected");
+            Serial.println("IP address: ");
+            Serial.println(WiFi.localIP());
+            M5.Lcd.setCursor(0, 0);
+            M5.Lcd.printf("CONNECTED to %s.", ssid);
+            break;
+        }
     }
+    //randomSeed(micros());
 
-    randomSeed(micros());
-    Serial.println("");
-    Serial.println("WiFi connected");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
-    M5.Lcd.println("\nCONNECTED!");
 }
 
 void onMqttMessage(int messageSize) {
@@ -137,7 +166,7 @@ void onMqttMessage(int messageSize) {
     int pump = doc["pump"];
     unsigned long now = millis();
     if (pump == 1){
-        nextWater = now + 2000UL;
+        nextWater = now + 3000UL;
     }
     Serial.print(pump);
     Serial.println();
@@ -152,9 +181,8 @@ void setup() {
     digitalWrite(PUMP_PIN, LOW);
     pinMode(M5_LED, OUTPUT);
     M5.Lcd.setRotation(3);  // Rotate the screen.
-    M5.Lcd.printf("\nConnecting to %s", ssid);
     Serial.begin(115200);
-    setup_wifi();
+    reconnect_wifi();
     String willPayload = "oh no!";
     bool willRetain = true;
     int willQos = 1;
@@ -162,12 +190,14 @@ void setup() {
     mqttClient.beginWill(willTopic, willPayload.length(), willRetain, willQos);
     mqttClient.print(willPayload);
     mqttClient.endWill();
+        M5.Lcd.setCursor(0, 40);
     if (!mqttClient.connect(mqtt_broker, mqtt_port)) {
         Serial.print("MQTT connection failed! Error code = ");
         Serial.println(mqttClient.connectError());
 
         while (1);
     }
+        M5.Lcd.setCursor(0, 40);
 
     Serial.println("You're connected to the MQTT broker!");
 
@@ -228,8 +258,17 @@ void setup() {
 }
 void loop() {
     static  unsigned long lastMsg = 0;
+    static  unsigned long lastLed = 0;
+    const int ledPeriod = 2 * 1000U;
+
     StaticJsonDocument<256> doc;
 
+    if (wifiOK && (WiFi.status() != WL_CONNECTED)){
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.printf("Lost Conn to %s. 123456", ssid);
+        wifiOK = false;
+        led_blink = false;
+    }
     unsigned long now = millis();
     if (now > nextWater){
         nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
@@ -247,17 +286,27 @@ void loop() {
     //
     mqttClient.poll();
     now = millis();
+
+    if(led_blink)
+        if (now - lastLed > ledPeriod) {
+            lastLed = now;
+            led_state = not led_state;
+            digitalWrite(M5_LED, led_state);
+        }
+
     if (now - lastMsg > msgPeriod) {
         lastMsg = now;
+        M5.Lcd.setCursor(0, 40);
 
         rawADC = analogRead(INPUT_PIN);
         //Serial.print(now/1000);
         snprintf(msg, MSG_BUFFER_SIZE, "%u, Humid ADC: %ld, ", now/1000, rawADC);
         Serial.print(msg);
+        Serial.print(" Wifi: ");
+        Serial.println(wifiOK);
         //M5.Lcd.setCursor(0, 25);  // Set cursor to (0,25).
         M5.Lcd.setCursor(0, 40);
         M5.Lcd.print(msg);
-       // M5.Lcd.print("\nADC: " + String(rawADC));
 
         printLocalTime(); // Time string will be on msg
         doc["time"]  = msg;
