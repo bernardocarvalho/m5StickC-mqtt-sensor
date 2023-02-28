@@ -22,6 +22,7 @@ Host gps
 
 #include <Arduino.h>
 
+#include <EEPROM.h>
 #include <M5StickC.h>
 #include <WiFi.h>
 
@@ -34,6 +35,9 @@ Host gps
 #include <ArduinoMqttClient.h>
 #include <ArduinoJson.h>
 
+int addr = 0;  // EEPROM Start number of an ADDRESS.  EEPROM
+#define SIZE 32  // define the size of EEPROM(Byte).
+                 //
 // Set the name and password of the wifi to be connected.
 #ifndef SECRET_SSID
 #include "arduino_secrets.h"
@@ -51,6 +55,10 @@ const int msgPeriod = 30 * 1000U;
 #define INPUT_PIN 33 //  SCL
 #define PUMP_PIN  32 //  SDA
 
+#define NH2O_E_ADD    0x0
+#define SUMH2O_E_ADD  0x4
+#define CNTH2O_E_ADD  0x8
+#define REBOOTS_E_ADD 0xC
 
 WiFiClient espClient;
 MqttClient mqttClient(espClient);
@@ -114,7 +122,7 @@ void reconnect_wifi() {
     led_state = false;
     led_blink = false;
 
-    for(int i = 0; i < WIFI_RETRY; i++){
+    for (int i = 0; i < WIFI_RETRY; i++){
         if (WiFi.status() != WL_CONNECTED) {
             Serial.print(".");
             led_state = not led_state;
@@ -172,17 +180,27 @@ void onMqttMessage(int messageSize) {
     Serial.println();
 
 }
-
-void setup() {
-    M5.begin();             // Init M5Stick.
-    M5.Axp.EnableCoulombcounter();  // Enable Coulomb counter.
-    pinMode(INPUT_PIN, INPUT);
-    pinMode(PUMP_PIN, OUTPUT);
-    digitalWrite(PUMP_PIN, LOW);
-    pinMode(M5_LED, OUTPUT);
-    M5.Lcd.setRotation(3);  // Rotate the screen.
-    Serial.begin(115200);
-    reconnect_wifi();
+void write_long_eeprom(int addr, unsigned long val) {
+    unsigned int uval;
+    for (int i = 0; i < 4; i++) {
+        uval = (unsigned int) ( 0xFF & val);
+        EEPROM.write(addr, val);
+        val /= 256;
+        addr++;
+    }
+}
+unsigned long read_long_eeprom(int addr) {
+    unsigned int uval;
+    unsigned long val = 0;
+    for (int i = 3; i >= 0; i--) {
+        val = val << 4;
+        uval = 0xFF * EEPROM.read(addr);
+        val |= uval;
+        addr++;
+    }
+    return val;
+}
+void setupMqtt() {
     String willPayload = "oh no!";
     bool willRetain = true;
     int willQos = 1;
@@ -218,6 +236,29 @@ void setup() {
 
     // topics can be unsubscribed using:
     // mqttClient.unsubscribe(inTopic);
+
+}
+void setup() {
+    M5.begin();             // Init M5Stick.
+    M5.Axp.EnableCoulombcounter();  // Enable Coulomb counter.
+    pinMode(INPUT_PIN, INPUT);
+    pinMode(PUMP_PIN, OUTPUT);
+    digitalWrite(PUMP_PIN, LOW);
+    pinMode(M5_LED, OUTPUT);
+    M5.Lcd.setRotation(3);  // Rotate the screen.
+    Serial.begin(115200);
+    if (!EEPROM.begin(SIZE)) {  // Request storage of SIZE size(success return
+        Serial.println(
+            "\nFailed to initialise EEPROM!");
+   //     delay(1000000);
+    }
+    //Serial.println("\n\nPress BtnA to Write EEPROM");
+    nextWater = read_long_eeprom(NH2O_E_ADD);
+    sumWater = read_long_eeprom(SUMH2O_E_ADD);
+    //reboo = read_long_eeprom(REBOOTS_E_ADD);
+    
+    reconnect_wifi();
+    setupMqtt();
 
     configTime(gmtOffset_sec, daylightOffset_sec,
             ntpServer, "pool.ntp.org", "time.nist.gov");  // init and get the time .
@@ -268,6 +309,8 @@ void loop() {
         M5.Lcd.printf("Lost Conn to %s. 123456", ssid);
         wifiOK = false;
         led_blink = false;
+        write_long_eeprom(NH2O_E_ADD, nextWater);
+        write_long_eeprom(SUMH2O_E_ADD, sumWater);
     }
     unsigned long now = millis();
     if (now > nextWater){
@@ -324,11 +367,13 @@ void loop() {
         int publishQos = 1;
         bool dup = false;
 
-        mqttClient.beginMessage(outTopic,  (unsigned long)measureJson(doc), retained, publishQos, dup);
+        mqttClient.beginMessage(outTopic,  (unsigned long) measureJson(doc), retained, publishQos, dup);
         serializeJson(doc, mqttClient);
         mqttClient.endMessage();
     }
 }
+
+// vim: syntax=cpp ts=4 sw=4 sts=4 sr et
 
 /*
 #define SERIAL_PRINTF_MAX_BUFF      256
