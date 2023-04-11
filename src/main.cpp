@@ -1,22 +1,20 @@
 /*
- * vim: sta:et:sw=4:ts=4:sts=4
+ * vim: syntax=cpp ts=4 sw=4 sts=4 sr et
+ * Use: SyntasticToggleMode
+ *
  *  * @file
  *******************************************************************************
  * Copyright (c) 2021 by M5Stack
  *                  Equipped with M5StickC sample source code
- *                          配套  M5StickC 示例源代码
- * Visit for more information: https://docs.m5stack.com/en/core/m5stickc
  *
  * Describe:  NTP TIME.
  * Date: 2021/8/3
-Host gps
-    HostName 10.136.227.237
-    User bernardo
  * https://docs.m5stack.com/en/core/m5stickc
  * https://docs.m5stack.com/en/unit/watering
  * https://github.com/m5stack/M5Stack/blob/master/examples/Unit/WATERING/WATERING.ino
  * https://console.hivemq.cloud/clients/arduino-esp8266?uuid=e6c3a2b784ad4434b0238f17f98eac34
- * https://github.com/m5stack/M5StickC/blob/master/examples/Advanced/MQTT/MQTT.ino
+ * https://github.com/m5stack/M5StickC/blob/master/examples/Advanced/MQTT/MQTT.ino;
+  https://github.com/arduino-libraries/ArduinoMqttClient
  ******************************************************************************
  */
 
@@ -37,13 +35,14 @@ Host gps
 
 int addr = 0;  // EEPROM Start number of an ADDRESS.  EEPROM
 #define SIZE 32  // define the size of EEPROM(Byte).
-                 //
+//
 // Set the name and password of the wifi to be connected.
 #ifndef SECRET_SSID
 #include "arduino_secrets.h"
 #endif
 
-const int WATER_AUTO = 2UL; // in sec. Auto water/ day
+const int WATER_TIME = 10U; // in sec. 
+const long AUTO_WATER = 12UL * 3600UL * 1000UL; // Water cycle in ms
 
 const char *ssid = SECRET_SSID;
 const char *password = SECRET_PASS;
@@ -51,6 +50,7 @@ const char *password = SECRET_PASS;
 const char* mqtt_broker  = "test.mosquitto.org";
 const int mqtt_port = 1883;
 const int msgPeriod = 30 * 1000U;
+const int wifiPeriod = 360 * 1000U;
 
 #define INPUT_PIN 33 //  SCL
 #define PUMP_PIN  32 //  SDA
@@ -60,6 +60,11 @@ const int msgPeriod = 30 * 1000U;
 #define CNTH2O_E_ADD  0x8
 #define REBOOTS_E_ADD 0xC
 
+#define WIFI_LINE    00
+#define MQTT_LINE    10
+#define MSG_LINE     20
+#define TIME_LINE    30
+//
 WiFiClient espClient;
 MqttClient mqttClient(espClient);
 
@@ -74,7 +79,7 @@ const int daylightOffset_sec = 0; // 3600;
 #define MSG_BUFFER_SIZE 50
 char msg[MSG_BUFFER_SIZE];
 
-#define WIFI_RETRY 20
+#define WIFI_RETRY 30
 bool wifiOK = false;
 bool ntpOK = false;
 
@@ -82,13 +87,19 @@ bool led_blink = false;
 bool led_state = false;
 
 int rawADC;
-unsigned int sumWater = 0;
+unsigned int sumWater;
 
 unsigned long stopPump = 0, nextWater;
+unsigned long nextMsg = 0;
+unsigned long nextWifiCheck;
+
+int setupMqtt();
+unsigned long read_long_eeprom(unsigned int addr);
+void write_long_eeprom(unsigned int addr, unsigned long val);
 
 void printLocalTime() {  // Output current time.
     struct tm timeinfo;
-    M5.Lcd.setCursor(0, 20);
+    M5.Lcd.setCursor(0, MSG_LINE);
     if (!getLocalTime(&timeinfo)) {  // Return 1 when the time is successfully
         // obtained.
         M5.Lcd.println("Failed to obtain time");
@@ -103,15 +114,29 @@ void printLocalTime() {  // Output current time.
     strftime(msg, MSG_BUFFER_SIZE, "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
 
 }
-void reconnect_wifi() {
+void reconnectWifi() {
     if (WiFi.status() == WL_CONNECTED)
-        return;
-    delay(10);
+        if (mqttClient.connected() == 1)
+            return;
+        else {
+            mqttClient.unsubscribe(inTopic);
+            Serial.print("No mqttClient, ");
+        }
+    {
+        Serial.print(" No link. Wifi "); Serial.print(WiFi.status());
+    }
+    Serial.print(" MQTT "); Serial.println(mqttClient.connected());
+    mqttClient.unsubscribe(inTopic);
+    mqttClient.flush();
+    mqttClient.stop();
+    delay(3000); 
+
+    read_long_eeprom(SUMH2O_E_ADD);
     // We start by connecting to a WiFi network
     Serial.println();
     Serial.print("Connecting to ");
     Serial.println(ssid);
-    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.setCursor(0, WIFI_LINE);
     M5.Lcd.printf("Connecting to %s.", ssid);
 
     WiFi.mode(WIFI_STA);
@@ -127,26 +152,54 @@ void reconnect_wifi() {
             Serial.print(".");
             led_state = not led_state;
             digitalWrite(M5_LED, led_state);
-            delay(500);
-           // continue;
+            delay(1000);
+            // continue;
         }
         else {
-            wifiOK = true;
             led_blink = true;
 
             Serial.println("");
             Serial.println("WiFi connected");
             Serial.println("IP address: ");
             Serial.println(WiFi.localIP());
-            M5.Lcd.setCursor(0, 0);
+            M5.Lcd.setCursor(0, WIFI_LINE);
             M5.Lcd.printf("CONNECTED to %s.", ssid);
-            break;
+            if(setupMqtt() == 0) {
+                wifiOK = true;
+                //wifiRetries = 0;
+                break;
+            }
+            else {
+                //WiFi.disconnect();
+                delay(2000);
+            }
+                //
         }
     }
     //randomSeed(micros());
 
 }
 
+void write_long_eeprom(unsigned int addr, unsigned long val) {
+    unsigned int uval;
+    for (int i = 0; i < 4; i++) {
+        uval = (unsigned int) ( 0xFF & val);
+        EEPROM.write(addr + i, uval);
+        val /= 256;
+    }
+}
+unsigned long read_long_eeprom(unsigned int addr) {
+    unsigned int uval;
+    unsigned long val = 0;
+    for (int i = 3; i >= 0; i--) {
+        val = val << 4;
+        uval = EEPROM.read(addr + i);
+        Serial.println(uval,HEX);
+        uval &= 0xFF;
+        val |= uval;
+    }
+    return val;
+}
 void onMqttMessage(int messageSize) {
     StaticJsonDocument<256> doc;
     // we received a message, print out the topic and contents
@@ -160,6 +213,7 @@ void onMqttMessage(int messageSize) {
     Serial.print(mqttClient.messageRetain() ? "true" : "false");
     Serial.print("', length ");
     Serial.print(messageSize);
+//    nextWater = read_long_eeprom(NH2O_E_ADD);
     Serial.println(" bytes:");
 
     /* use the Stream interface to print the contents
@@ -179,28 +233,20 @@ void onMqttMessage(int messageSize) {
     Serial.print(pump);
     Serial.println();
 
-}
-void write_long_eeprom(int addr, unsigned long val) {
-    unsigned int uval;
-    for (int i = 0; i < 4; i++) {
-        uval = (unsigned int) ( 0xFF & val);
-        EEPROM.write(addr, val);
-        val /= 256;
-        addr++;
+    int save = doc["save"];
+
+    if (save == 1) {
+        read_long_eeprom(SUMH2O_E_ADD);
+        read_long_eeprom(NH2O_E_ADD);
+        write_long_eeprom(SUMH2O_E_ADD, sumWater);
+        write_long_eeprom(NH2O_E_ADD, nextWater);
+        Serial.print("\"save\":");
+        Serial.println(save);
     }
+
+    nextMsg = now + 1000UL;
 }
-unsigned long read_long_eeprom(int addr) {
-    unsigned int uval;
-    unsigned long val = 0;
-    for (int i = 3; i >= 0; i--) {
-        val = val << 4;
-        uval = 0xFF * EEPROM.read(addr);
-        val |= uval;
-        addr++;
-    }
-    return val;
-}
-void setupMqtt() {
+int setupMqtt() {
     String willPayload = "oh no!";
     bool willRetain = true;
     int willQos = 1;
@@ -208,14 +254,14 @@ void setupMqtt() {
     mqttClient.beginWill(willTopic, willPayload.length(), willRetain, willQos);
     mqttClient.print(willPayload);
     mqttClient.endWill();
-        M5.Lcd.setCursor(0, 40);
+    M5.Lcd.setCursor(0, MQTT_LINE);
     if (!mqttClient.connect(mqtt_broker, mqtt_port)) {
         Serial.print("MQTT connection failed! Error code = ");
         Serial.println(mqttClient.connectError());
-
-        while (1);
+        M5.Lcd.printf("MQTT not connected");
+        return -1;
+        //while (1);
     }
-        M5.Lcd.setCursor(0, 40);
 
     Serial.println("You're connected to the MQTT broker!");
 
@@ -232,7 +278,34 @@ void setupMqtt() {
     // QoS 1  guarantees that the message will be transferred successfully to the broker.
     int subscribeQos = 1;
 
+    int rc=0;
+    mqttClient.unsubscribe(inTopic);
     mqttClient.subscribe(inTopic, subscribeQos);
+    M5.Lcd.setCursor(0, MQTT_LINE);
+    M5.Lcd.printf("Subscribed       ");
+    Serial.print(inTopic);
+    Serial.println(" ...Subscribed");
+    /*
+    for (int i = 0; i < WIFI_RETRY; i++){
+        rc = mqttClient.subscribe(inTopic, subscribeQos);
+        M5.Lcd.setCursor(0, MQTT_LINE);
+        if(rc==0) {
+            M5.Lcd.printf("Subscribed");
+            Serial.print(inTopic);
+            Serial.println(" ...Subscribed");
+            break;
+        }
+        else {
+            mqttClient.unsubscribe(inTopic);
+            M5.Lcd.printf("Not Subscribed");
+
+            Serial.println("...Not Subscribed");
+            delay(1000);
+        }
+    }
+*/
+    return rc;
+
 
     // topics can be unsubscribed using:
     // mqttClient.unsubscribe(inTopic);
@@ -247,18 +320,32 @@ void setup() {
     pinMode(M5_LED, OUTPUT);
     M5.Lcd.setRotation(3);  // Rotate the screen.
     Serial.begin(115200);
-    if (!EEPROM.begin(SIZE)) {  // Request storage of SIZE size(success return
-        Serial.println(
-            "\nFailed to initialise EEPROM!");
-   //     delay(1000000);
-    }
-    //Serial.println("\n\nPress BtnA to Write EEPROM");
-    nextWater = read_long_eeprom(NH2O_E_ADD);
-    sumWater = read_long_eeprom(SUMH2O_E_ADD);
-    //reboo = read_long_eeprom(REBOOTS_E_ADD);
+    //delay(2000);
+    //while(!Serial);
+    Serial.println("\nHello!");
     
-    reconnect_wifi();
-    setupMqtt();
+    if (!EEPROM.begin(SIZE)) {  // Request storage of SIZE size(success return
+        delay(1000000);
+        Serial.println("\nFailed to initialise EEPROM!");
+        //     delay(1000000);
+    }
+    delay(5000);
+    Serial.println("\nHello!");
+    //Serial.println("\n\nPress BtnA to Write EEPROM");
+    //write_long_eeprom(NH2O_E_ADD, 0UL);
+    EEPROM.write(NH2O_E_ADD, 0);
+    EEPROM.write(NH2O_E_ADD + 1, 0);
+    EEPROM.write(NH2O_E_ADD + 2, 0);
+    EEPROM.write(NH2O_E_ADD + 3, 0);
+    delay(5000);
+    sumWater = read_long_eeprom(SUMH2O_E_ADD);
+    nextWater = read_long_eeprom(NH2O_E_ADD);
+    //sumWater = 0;
+    //reboo = read_long_eeprom(REBOOTS_E_ADD);
+
+    reconnectWifi();
+
+    nextWifiCheck = millis() + 3600000UL;
 
     configTime(gmtOffset_sec, daylightOffset_sec,
             ntpServer, "pool.ntp.org", "time.nist.gov");  // init and get the time .
@@ -294,16 +381,16 @@ void setup() {
     // printLocalTime();
     //WiFi.mode(WIFI_OFF);  // Set the wifi mode to off.
     unsigned long now = millis();
-    nextWater =  now + 24UL * 3600UL * 1000UL; // start next day
-    delay(20);
+    nextWater =  now + AUTO_WATER;
+    //24UL * 3600UL * 1000UL; // start next day
+    delay(200);
 }
 void loop() {
-    static  unsigned long lastMsg = 0;
     static  unsigned long lastLed = 0;
     const int ledPeriod = 2 * 1000U;
 
     StaticJsonDocument<256> doc;
-
+/*
     if (wifiOK && (WiFi.status() != WL_CONNECTED)){
         M5.Lcd.setCursor(0, 0);
         M5.Lcd.printf("Lost Conn to %s. 123456", ssid);
@@ -312,12 +399,35 @@ void loop() {
         write_long_eeprom(NH2O_E_ADD, nextWater);
         write_long_eeprom(SUMH2O_E_ADD, sumWater);
     }
+*/
+    M5.update();  // Read the press state of the key.
+    if (M5.BtnB.wasReleasefor( 700)) {  // The button B is pressed for 700ms. 
+        //M5.Lcd.fillScreen( BLACK);  // Set BLACK to the background color.  
+        M5.Lcd.setCursor(0, MSG_LINE);
+        Serial.println("Reseting eeprom");
+        sumWater = 11;
+        //write_long_eeprom(SUMH2O_E_ADD, sumWater);
+        write_long_eeprom(NH2O_E_ADD, 0);
+        EEPROM.write(SUMH2O_E_ADD, 11);
+        EEPROM.write(SUMH2O_E_ADD + 1, 0);
+        EEPROM.write(SUMH2O_E_ADD + 2, 0);
+        EEPROM.write(SUMH2O_E_ADD + 3, 0);
+    }
+
     unsigned long now = millis();
+    if (now  > nextWifiCheck) {
+        nextWifiCheck = now + wifiPeriod;
+        reconnectWifi();
+    }
+
     if (now > nextWater){
-        nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
-        stopPump = now + WATER_AUTO * 1000UL;
-        sumWater += WATER_AUTO;
+        nextWater =  now + AUTO_WATER;
+        //nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
+        stopPump = now + WATER_TIME * 1000UL;
+        sumWater += WATER_TIME;
         led_state = true;
+        // write_long_eeprom(SUMH2O_E_ADD, sumWater);
+        // write_long_eeprom(NH2O_E_ADD, nextWater);
         digitalWrite(M5_LED, led_state);
         digitalWrite(PUMP_PIN, HIGH);
     }
@@ -337,18 +447,19 @@ void loop() {
             digitalWrite(M5_LED, led_state);
         }
 
-    if (now - lastMsg > msgPeriod) {
-        lastMsg = now;
-        M5.Lcd.setCursor(0, 40);
+    if (now > nextMsg ) {
+        nextMsg = now + msgPeriod;
+        //M5.Lcd.setCursor(0, 40);
 
+        Serial.print(" Wifi: ");
         rawADC = analogRead(INPUT_PIN);
         //Serial.print(now/1000);
-        snprintf(msg, MSG_BUFFER_SIZE, "%u, Humid ADC: %ld, ", now/1000, rawADC);
+        snprintf(msg, MSG_BUFFER_SIZE, "%u, Humid ADC: %u, SumW: %lu", now/1000, rawADC, sumWater);
         Serial.print(msg);
         Serial.print(" Wifi: ");
         Serial.println(wifiOK);
         //M5.Lcd.setCursor(0, 25);  // Set cursor to (0,25).
-        M5.Lcd.setCursor(0, 40);
+        M5.Lcd.setCursor(0, MSG_LINE);
         M5.Lcd.print(msg);
 
         printLocalTime(); // Time string will be on msg
@@ -379,26 +490,26 @@ void loop() {
 #define SERIAL_PRINTF_MAX_BUFF      256
 void serialPrintf(const char *fmt, ...);
 void serialPrintf(const char *fmt, ...) {
-    // Buffer for storing the formatted data
-    char buff[SERIAL_PRINTF_MAX_BUFF];
-    // pointer to the variable arguments list
-    va_list pargs;
-    // Initialise pargs to point to the first optional argument
-    va_start(pargs, fmt);
-    // create the formatted data and store in buff
-    vsnprintf(buff, SERIAL_PRINTF_MAX_BUFF, fmt, pargs);
-    va_end(pargs);
-    Serial.print(buff);
+// Buffer for storing the formatted data
+char buff[SERIAL_PRINTF_MAX_BUFF];
+// pointer to the variable arguments list
+va_list pargs;
+// Initialise pargs to point to the first optional argument
+va_start(pargs, fmt);
+// create the formatted data and store in buff
+vsnprintf(buff, SERIAL_PRINTF_MAX_BUFF, fmt, pargs);
+va_end(pargs);
+Serial.print(buff);
 }
 */
-        
+
 /*
-         *
-           display.printf("Bat:\r\n  V: %.3fv  I: %.3fma\r\n", M5.Axp.GetBatVoltage(),
-           M5.Axp.GetBatCurrent());
-           display.printf("USB:\r\n  V: %.3fv  I: %.3fma\r\n", M5.Axp.GetVBusVoltage(),
-           M5.Axp.GetVBusCurrent());
-           display.printf("5V-In:\r\n  V: %.3fv  I: %.3fma\r\n",
-           M5.Axp.GetVinVoltage(), M5.Axp.GetVinCurrent());
-           display.printf("Bat power %.3fmw", M5.Axp.GetBatPower());
-*/
+ *
+ display.printf("Bat:\r\n  V: %.3fv  I: %.3fma\r\n", M5.Axp.GetBatVoltage(),
+ M5.Axp.GetBatCurrent());
+ display.printf("USB:\r\n  V: %.3fv  I: %.3fma\r\n", M5.Axp.GetVBusVoltage(),
+ M5.Axp.GetVBusCurrent());
+ display.printf("5V-In:\r\n  V: %.3fv  I: %.3fma\r\n",
+ M5.Axp.GetVinVoltage(), M5.Axp.GetVinCurrent());
+ display.printf("Bat power %.3fmw", M5.Axp.GetBatPower());
+ */
