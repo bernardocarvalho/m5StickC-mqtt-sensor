@@ -32,7 +32,7 @@
 
 #include <ArduinoMqttClient.h>
 #include <ArduinoJson.h>
-
+//Auto water/ day
 int addr = 0;  // EEPROM Start number of an ADDRESS.  EEPROM
 #define SIZE 32  // define the size of EEPROM(Byte).
 //
@@ -41,7 +41,8 @@ int addr = 0;  // EEPROM Start number of an ADDRESS.  EEPROM
 #include "arduino_secrets.h"
 #endif
 
-const int WATER_TIME = 10U; // in sec. 
+const int WATER_TIME = 15U; // in sec. 
+const int RELAY_MTIME = 1000U; // in msec. 
 const long AUTO_WATER = 12UL * 3600UL * 1000UL; // Water cycle in ms
 
 const char *ssid = SECRET_SSID;
@@ -54,6 +55,8 @@ const int wifiPeriod = 360 * 1000U;
 
 #define INPUT_PIN 33 //  SCL
 #define PUMP_PIN  32 //  SDA
+#define RELAY_PIN 26
+#define RELAY2_PIN 0
 
 #define NH2O_E_ADD    0x0
 #define SUMH2O_E_ADD  0x4
@@ -89,9 +92,9 @@ bool led_state = false;
 int rawADC;
 unsigned int sumWater;
 
-unsigned long stopPump = 0, nextWater;
+unsigned long stopPump = 0, stopRelay = 0;
 unsigned long nextMsg = 0;
-unsigned long nextWifiCheck;
+unsigned long nextWifiCheck, nextWater;
 
 int setupMqtt();
 unsigned long read_long_eeprom(unsigned int addr);
@@ -101,6 +104,7 @@ void printLocalTime() {  // Output current time.
     struct tm timeinfo;
     M5.Lcd.setCursor(0, MSG_LINE);
     if (!getLocalTime(&timeinfo)) {  // Return 1 when the time is successfully
+//Auto water/ day
         // obtained.
         M5.Lcd.println("Failed to obtain time");
         return;
@@ -195,8 +199,7 @@ unsigned long read_long_eeprom(unsigned int addr) {
         val = val << 4;
         uval = EEPROM.read(addr + i);
         Serial.println(uval,HEX);
-        uval &= 0xFF;
-        val |= uval;
+        val |= (uval & 0xFF);
     }
     return val;
 }
@@ -242,6 +245,16 @@ void onMqttMessage(int messageSize) {
         write_long_eeprom(NH2O_E_ADD, nextWater);
         Serial.print("\"save\":");
         Serial.println(save);
+    }
+
+    int clear = doc["clear"];
+    if (clear == 1) {
+        Serial.println("Clear");
+        read_long_eeprom(SUMH2O_E_ADD);
+        write_long_eeprom(SUMH2O_E_ADD, 11);
+        sumWater = read_long_eeprom(SUMH2O_E_ADD);
+        Serial.print("\"clear\":");
+        Serial.println(sumWater);
     }
 
     nextMsg = now + 1000UL;
@@ -312,6 +325,10 @@ int setupMqtt() {
 
 }
 void setup() {
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
+//    pinMode(RELAY2_PIN, OUTPUT);
+//    digitalWrite(RELAY2_PIN, HIGH);
     M5.begin();             // Init M5Stick.
     M5.Axp.EnableCoulombcounter();  // Enable Coulomb counter.
     pinMode(INPUT_PIN, INPUT);
@@ -331,15 +348,17 @@ void setup() {
     }
     delay(5000);
     Serial.println("\nHello!");
+    /*
     //Serial.println("\n\nPress BtnA to Write EEPROM");
     //write_long_eeprom(NH2O_E_ADD, 0UL);
     EEPROM.write(NH2O_E_ADD, 0);
     EEPROM.write(NH2O_E_ADD + 1, 0);
     EEPROM.write(NH2O_E_ADD + 2, 0);
     EEPROM.write(NH2O_E_ADD + 3, 0);
+    */
     delay(5000);
     sumWater = read_long_eeprom(SUMH2O_E_ADD);
-    nextWater = read_long_eeprom(NH2O_E_ADD);
+    //nextWater = read_long_eeprom(NH2O_E_ADD);
     //sumWater = 0;
     //reboo = read_long_eeprom(REBOOTS_E_ADD);
 
@@ -384,11 +403,14 @@ void setup() {
     nextWater =  now + AUTO_WATER;
     //24UL * 3600UL * 1000UL; // start next day
     delay(200);
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
 }
 void loop() {
     static  unsigned long lastLed = 0;
     const int ledPeriod = 2 * 1000U;
 
+    //digitalWrite(RELAY2_PIN, HIGH);
     StaticJsonDocument<256> doc;
 /*
     if (wifiOK && (WiFi.status() != WL_CONNECTED)){
@@ -424,17 +446,22 @@ void loop() {
         nextWater =  now + AUTO_WATER;
         //nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
         stopPump = now + WATER_TIME * 1000UL;
+        stopRelay = now + RELAY_MTIME;
         sumWater += WATER_TIME;
         led_state = true;
         // write_long_eeprom(SUMH2O_E_ADD, sumWater);
         // write_long_eeprom(NH2O_E_ADD, nextWater);
         digitalWrite(M5_LED, led_state);
         digitalWrite(PUMP_PIN, HIGH);
+        digitalWrite(RELAY_PIN, HIGH);
     }
     if (now > stopPump){
         digitalWrite(PUMP_PIN, LOW);
         led_state = false;
         digitalWrite(M5_LED, led_state);
+    }
+    if (now > stopRelay){
+        digitalWrite(RELAY_PIN, LOW);
     }
     //
     mqttClient.poll();
