@@ -24,7 +24,7 @@
 #include <M5StickC.h>
 #include <WiFi.h>
 
-//#include <NTPClient.h>
+//#include <NTPClient.hrd>
 //#include <TZ.h>
 //#include <FS.h>
 
@@ -41,7 +41,7 @@ int addr = 0;  // EEPROM Start number of an ADDRESS.  EEPROM
 #include "arduino_secrets.h"
 #endif
 
-const int WATER_TIME = 15U; // in sec. 
+const int WATER_TIME = 5U; // in sec. 
 const int RELAY_MTIME = 1000U; // in msec. 
 const long AUTO_WATER = 12UL * 3600UL * 1000UL; // Water cycle in ms
 
@@ -445,7 +445,7 @@ void loop() {
     if (now > nextWater){
         nextWater =  now + AUTO_WATER;
         //nextWater =  now + 24UL * 3600UL * 1000UL; // repeat next day
-        stopPump = now + WATER_TIME * 1000UL;
+        stopPump = now + WATER_TIME * 1000U;
         stopRelay = now + RELAY_MTIME;
         sumWater += WATER_TIME;
         led_state = true;
